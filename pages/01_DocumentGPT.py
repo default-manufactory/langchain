@@ -2,13 +2,14 @@ import time
 from uuid import UUID
 from langchain.prompts import ChatPromptTemplate
 from langchain.schema.runnable import RunnableLambda, RunnablePassthrough
-from langchain.document_loaders import UnstructuredFileLoader
+from langchain.document_loaders import UnstructuredFileLoader ,PyPDFLoader
 from langchain.embeddings import CacheBackedEmbeddings, OpenAIEmbeddings
 from langchain.storage import LocalFileStore
 from langchain.text_splitter import CharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain.chat_models.openai import ChatOpenAI
 from langchain.callbacks.base import BaseCallbackHandler
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 import streamlit as st
 
 st.set_page_config(
@@ -31,8 +32,9 @@ class ChatCallbackHandler(BaseCallbackHandler):
 
 
 llm = ChatOpenAI(
-    temperature=0.1,
     streaming=True,
+    model="gpt-4o",
+    temperature=0.0,
     callbacks=[
         ChatCallbackHandler(),
     ]
@@ -46,17 +48,21 @@ def embed_file(file):
     with open(file_path, "wb") as f:
         f.write(file_content)
     cache_dir = LocalFileStore(f"./.cache/embeddings/{file.name}")
-    splitter = CharacterTextSplitter.from_tiktoken_encoder(
-        separator="\n",
-        chunk_size=600,
-        chunk_overlap=100,
+    
+
+    loader = PyPDFLoader(file_path)
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=800,  # Smaller chunks for better relevance
+        chunk_overlap=300,  # Sufficient overlap for context continuity
+        separators=["\n\n", "\n", " ", ""],
     )
-    loader = UnstructuredFileLoader(file_path)
     docs = loader.load_and_split(text_splitter=splitter)
+    
     embeddings = OpenAIEmbeddings()
     cached_embeddings = CacheBackedEmbeddings.from_bytes_store(embeddings, cache_dir)
     vectorstore = FAISS.from_documents(docs, cached_embeddings)
-    retriever = vectorstore.as_retriever()
+    
+    retriever = vectorstore.as_retriever(search_type="similarity", search_kwargs={"k": 10})
     return retriever
 
 def save_message(message, role):
@@ -67,7 +73,6 @@ def send_message(message, role, save=True):
         st.markdown(message)
     if save:
         st.session_state["messages"].append({"message": message, "role": role})
-
 
 def paint_history():
     for message in st.session_state["messages"]:
@@ -85,7 +90,8 @@ prompt = ChatPromptTemplate.from_messages(
         (
             "system",
             """
-            Answer the question using ONLY the following context. If you don't know the answer just say you don't know. DON'T make anything up.
+            Answer the question using ONLY the following context. If the context is insufficient I am pretty sure there is more infomation so look for it deeply. Look through more files if you don't have information.
+            Provide concise and accurate answers. Avoid verbosity and unrelated information. make the answer 500 to 1500 words. Also, I want you to separate paragraphs.
             
             Context: {context}
             """,
